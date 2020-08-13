@@ -1,7 +1,10 @@
 #include <algorithm>
 #include <cassert>
+#include <climits>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -31,19 +34,19 @@ struct Token {
   std::string Value;
 };
 
-template <typename... ArgsT> void EmitErrorImpl(ArgsT &&... Args);
-template <> void EmitErrorImpl<>() {}
+template <typename... ArgsT> void emitErrorImpl(ArgsT &&... Args);
+template <> void emitErrorImpl<>() {}
 
 template <typename HeadT, typename... TailT>
-void EmitErrorImpl(HeadT &&H, TailT &&... T) {
+void emitErrorImpl(HeadT &&H, TailT &&... T) {
   std::cerr << H;
-  EmitErrorImpl(std::forward<TailT>(T)...);
+  emitErrorImpl(std::forward<TailT>(T)...);
 }
 
 template <typename... ArgsT>
-[[noreturn]] void EmitError(std::string E, ArgsT &&... Args) {
+[[noreturn]] void emitError(std::string E, ArgsT &&... Args) {
   std::cerr << "[Error] " << E << ": ";
-  EmitErrorImpl(std::forward<ArgsT>(Args)...);
+  emitErrorImpl(std::forward<ArgsT>(Args)...);
   std::cerr << "\n";
   exit(1);
 }
@@ -90,7 +93,7 @@ Token Tokenizer::getDeclOrIDToken(char C) {
     C = IFS.get();
   }
   Token Tok;
-  if (V.size() == 1 && V[0] == 'i' || V[0] == 'f' || V[0] == 'p') {
+  if (V.size() == 1 && (V[0] == 'i' || V[0] == 'f' || V[0] == 'p')) {
     Tok.Type = V[0] == 'i' ? DECL_INT : V[0] == 'f' ? DECL_FLOAT : CMD_PRINT;
   } else {
     Tok.Type = IDENTIFIER;
@@ -117,7 +120,7 @@ Token Tokenizer::getParenOrOpToken(char C) {
   case ')':
     return Token{PAREN_R};
   default:
-    EmitError("Tokenizer", "expecting '+', '-', '*', '/' or '=', but '", C,
+    emitError("Tokenizer", "expecting '+', '-', '*', '/' or '=', but '", C,
               "' found.");
   }
 }
@@ -168,16 +171,25 @@ enum ASTNodeType {
   BIN_ADD_NODE,
   BIN_SUB_NODE,
   BIN_MUL_NODE,
-  BIN_DIV_NODE
+  BIN_DIV_NODE,
+  CONVERSION_NODE
 };
+
+enum DataType { DATA_INT, DATA_FLOAT };
 
 struct AST {
   ASTNodeType Type;
   std::vector<AST *> SubTree;
-  std::variant<int, float, size_t> Value;
+  std::variant<int, float, size_t, DataType> Value;
 
   AST(ASTNodeType T) : Type(T) {}
   AST(ASTNodeType T, AST *Child) : Type(T), SubTree({Child}) {}
+
+  ~AST() {
+    for (AST *Node : SubTree)
+      delete Node;
+    SubTree.clear();
+  }
 };
 
 class SymbolTable {
@@ -187,18 +199,23 @@ class SymbolTable {
 public:
   size_t declareSymbol(const std::string &ID, TokenType DeclType) {
     if (VarID.find(ID) != VarID.end())
-      EmitError("SymbolTable", "redeclaration of variable ", ID);
+      emitError("SymbolTable", "redeclaration of variable ", ID);
     size_t Res = (VarID[ID] = VarType.size());
     VarType.push_back((DeclType == DECL_INT ? VAR_INT : VAR_FLOAT));
     return Res;
   }
 
-  size_t getVarID(const std::string &ID) {
+  size_t getVarID(const std::string &ID) const {
     auto Ptr = VarID.find(ID);
     if (Ptr == VarID.end())
-      EmitError("SymbolTable", "use of undeclared variable ", ID);
+      emitError("SymbolTable", "use of undeclared variable ", ID);
     return Ptr->second;
   }
+
+  VariableType getVarType(const std::string &ID) const {
+    return VarType[getVarID(ID)];
+  }
+  VariableType getVarType(size_t V) const { return VarType[V]; }
 };
 
 class Parser {
@@ -210,8 +227,13 @@ class Parser {
   AST *parseDeclaration(TokenType DeclType);
   AST *parseExpression();
 
+  DataType getDataType(AST *Node) const;
+  DataType promoteType(AST *&LHS, AST *&RHS) const;
+
 public:
   Parser(std::ifstream &&S) : TK(std::move(S)) {}
+  const SymbolTable &getSymbolTable() const { return ST; }
+
   AST *parse();
 };
 
@@ -230,12 +252,12 @@ AST *Parser::parseStatement() {
     return parseAssignment(Tok.Value);
 
   if (Tok.Type != CMD_PRINT)
-    EmitError("Parser",
+    emitError("Parser",
               "expecting DECL_INT, DECL_FLOAT, IDENTIFIER or CMD_PRINT, but ",
               Tok.Type, " found.");
   Tok = TK.readToken();
   if (Tok.Type != IDENTIFIER)
-    EmitError("Parser", "expecting IDENTIFIER, but ", Tok.Type, " found.");
+    emitError("Parser", "expecting IDENTIFIER, but ", Tok.Type, " found.");
 
   size_t Var = ST.getVarID(Tok.Value);
   AST *Node = new AST(PRINTSTMT_NODE);
@@ -246,7 +268,7 @@ AST *Parser::parseStatement() {
 AST *Parser::parseDeclaration(TokenType DeclType) {
   Token Tok = TK.readToken();
   if (Tok.Type != IDENTIFIER)
-    EmitError("Parser", "expecting IDENTIFIER, but ", DeclType, " found.");
+    emitError("Parser", "expecting IDENTIFIER, but ", DeclType, " found.");
   AST *Node = new AST(DECLARATION_NODE);
   Node->Value = ST.declareSymbol(Tok.Value, DeclType);
   return Node;
@@ -255,9 +277,47 @@ AST *Parser::parseDeclaration(TokenType DeclType) {
 AST *Parser::parseAssignment(const std::string &ID) {
   size_t Var = ST.getVarID(ID);
   if (auto T = TK.readToken().Type; T != BIN_OP_ASSIGN)
-    EmitError("Parser", "expecting BIN_OP_ASSIGN, but ", T, " found.");
+    emitError("Parser", "expecting BIN_OP_ASSIGN, but ", T, " found.");
 
-  return new AST(ASSIGNMENT_NODE, parseExpression());
+  AST *Expr = parseExpression();
+  if (getDataType(Expr) == DATA_FLOAT && ST.getVarType(Var) == VAR_INT)
+    emitError("Parser", "cannot convert float to integer.");
+  AST *Node = new AST(ASSIGNMENT_NODE, Expr);
+  Node->Value = Var;
+  return Node;
+}
+
+DataType Parser::getDataType(AST *Node) const {
+  if (Node->Type == CONST_INT_NODE)
+    return DATA_INT;
+  if (Node->Type == CONST_FLOAT_NODE)
+    return DATA_FLOAT;
+  if (Node->Type == DECLARATION_NODE)
+    return ST.getVarType(std::get<size_t>(Node->Value)) == VAR_INT ? DATA_INT
+                                                                   : DATA_FLOAT;
+  if (Node->Type == BIN_ADD_NODE || Node->Type == BIN_SUB_NODE ||
+      Node->Type == BIN_MUL_NODE || Node->Type == BIN_DIV_NODE)
+    return std::get<DataType>(Node->Value);
+
+  emitError("Parser", "unexpected AST node type.");
+}
+
+DataType Parser::promoteType(AST *&LHS, AST *&RHS) const {
+  DataType L = getDataType(LHS);
+  DataType R = getDataType(RHS);
+  if (L == R)
+    return L;
+
+  AST *Cvt = new AST(CONVERSION_NODE);
+  Cvt->Value = DATA_FLOAT;
+  if (L == DATA_INT) {
+    Cvt->SubTree = {LHS};
+    LHS = Cvt;
+  } else {
+    Cvt->SubTree = {RHS};
+    RHS = Cvt;
+  }
+  return DATA_FLOAT;
 }
 
 void Parser::reduceStack(std::vector<AST *> &Stack) {
@@ -276,7 +336,9 @@ void Parser::reduceStack(std::vector<AST *> &Stack) {
   AST *Prev = Nodes[0];
   for (size_t i = 1; i < Nodes.size(); i += 2) {
     assert(Nodes[i]->Type == BIN_MUL_NODE || Nodes[i]->Type == BIN_DIV_NODE);
-    Nodes[i]->SubTree = {Prev, Nodes[i + 1]};
+    AST *LHS = Prev, *RHS = Nodes[i + 1];
+    Nodes[i]->Value = promoteType(LHS, RHS);
+    Nodes[i]->SubTree = {LHS, RHS};
     Prev = Nodes[i];
   }
   Stack.push_back(Prev);
@@ -293,7 +355,7 @@ AST *Parser::parseExpression() {
         TK.readToken();
         Stack.push_back(parseExpression());
         if (auto T = TK.readToken().Type; T != PAREN_R)
-          EmitError("Parser", "expecting PAREN_R, but ", T, " found.");
+          emitError("Parser", "expecting PAREN_R, but ", T, " found.");
         break;
       }
       case IDENTIFIER: {
@@ -306,19 +368,19 @@ AST *Parser::parseExpression() {
       case CONST_INT: {
         std::string Value = TK.readToken().Value;
         AST *Node = new AST(CONST_INT_NODE);
-        Node->Value = std::stoi(Value.c_str());
+        Node->Value = std::stoi(Value);
         Stack.push_back(Node);
         break;
       }
       case CONST_FLOAT: {
         std::string Value = TK.readToken().Value;
         AST *Node = new AST(CONST_FLOAT_NODE);
-        Node->Value = std::stof(Value.c_str());
+        Node->Value = std::stof(Value);
         Stack.push_back(Node);
         break;
       }
       default:
-        EmitError("Parser", "unexpected token type.");
+        emitError("Parser", "unexpected token type.");
       }
     } else {
       switch (Type) {
@@ -348,35 +410,196 @@ AST *Parser::parseExpression() {
   for (size_t i = 1; i < Stack.size(); i += 2) {
     assert(Stack[i]->Type == BIN_ADD_NODE || Stack[i]->Type == BIN_SUB_NODE);
     Stack[i]->SubTree = {Prev, Stack[i + 1]};
+    Stack[i]->Value = promoteType(Prev, Stack[i + 1]);
     Prev = Stack[i];
   }
   return Prev;
 }
 
-void generateAssignment(AST *Node) {
-  
+class DCCodeGen {
+  const SymbolTable &ST;
+  std::ofstream OFS;
+  enum Precision { PREC_INT, PREC_FLOAT, PREC_UNKNOWN };
+  Precision CurPrec = PREC_UNKNOWN;
+
+  void genStatement(AST *Stmt);
+  void genAssignment(AST *Stmt);
+  void genExpression(AST *Expr);
+  void genPrintStmt(AST *Stmt);
+
+public:
+  DCCodeGen(const SymbolTable &ST, std::ofstream &&S)
+      : ST(ST), OFS(std::move(S)) {
+    OFS << std::fixed << std::setprecision(5);
+  }
+
+  void genProgram(AST *Program);
+};
+
+void DCCodeGen::genProgram(AST *Program) {
+  assert(Program->Type == PROGRAM_NODE);
+  for (AST *Node : Program->SubTree)
+    genStatement(Node);
 }
 
-void generateStatement(AST *Stmt) {
-  switch (Stmt->Type) {
-    case ASSIGNMENT_NODE:
-      generateAssignment(Stmt);
+void DCCodeGen::genStatement(AST *Stmt) {
+  if (Stmt->Type == ASSIGNMENT_NODE)
+    return genAssignment(Stmt);
+  if (Stmt->Type == PRINTSTMT_NODE)
+    return genPrintStmt(Stmt);
+}
+
+void DCCodeGen::genAssignment(AST *Stmt) {
+  assert(Stmt->SubTree.size() == 1);
+  AST *Expr = Stmt->SubTree[0];
+  genExpression(Expr);
+  OFS << "s" << static_cast<char>('a' + std::get<size_t>(Stmt->Value)) << "\n";
+}
+
+char printOperator(ASTNodeType Type) {
+  if (Type == BIN_ADD_NODE)
+    return '+';
+  if (Type == BIN_SUB_NODE)
+    return '-';
+  if (Type == BIN_MUL_NODE)
+    return '*';
+
+  return '/';
+}
+
+void DCCodeGen::genExpression(AST *Expr) {
+  switch (Expr->Type) {
+  case CONVERSION_NODE:
+    return genExpression(Expr->SubTree[0]);
+  case IDENTIFIER_NODE:
+    OFS << "l" << static_cast<char>('a' + std::get<size_t>(Expr->Value))
+        << "\n";
+    return;
+  case CONST_INT_NODE:
+    OFS << std::get<int>(Expr->Value) << "\n";
+    return;
+  case CONST_FLOAT_NODE:
+    OFS << std::get<float>(Expr->Value) << "\n";
+    return;
+  case BIN_ADD_NODE:
+  case BIN_SUB_NODE:
+  case BIN_MUL_NODE:
+  case BIN_DIV_NODE: {
+    assert(Expr->SubTree.size() == 2);
+    genExpression(Expr->SubTree[0]);
+    genExpression(Expr->SubTree[1]);
+    Precision Prec =
+        std::get<DataType>(Expr->Value) == DATA_INT ? PREC_INT : PREC_FLOAT;
+    if (Prec != CurPrec) {
+      OFS << (Prec == PREC_INT ? 0 : 5) << " k\n";
+      CurPrec = Prec;
+    }
+    OFS << printOperator(Expr->Type) << "\n";
+    return;
+  }
+  default:
+    emitError("CodeGen", "unexpected AST node type.");
   }
 }
 
-void generateProgarm(AST *Program) {
-  for (AST *Node : Program->SubTree)
-    generateStatement(Node);
+void DCCodeGen::genPrintStmt(AST *Stmt) {
+  assert(Stmt->SubTree.empty());
+  OFS << "l" << static_cast<char>('a' + std::get<size_t>(Stmt->Value)) << "\n";
+  OFS << "p\n";
+}
+
+template <typename T> T fold(T LHS, T RHS, ASTNodeType Op) {
+  if (Op == BIN_ADD_NODE)
+    return LHS + RHS;
+  if (Op == BIN_SUB_NODE)
+    return LHS - RHS;
+  if (Op == BIN_MUL_NODE)
+    return LHS * RHS;
+  if (Op == BIN_DIV_NODE)
+    return LHS / RHS;
+
+  emitError("Optimizer", "unexpected binary operation.");
+}
+
+void optExpression(AST *Expr) {
+  if (Expr->Type == CONVERSION_NODE) {
+    AST *Child = Expr->SubTree[0];
+    optExpression(Child);
+    assert(Child->Type != CONST_FLOAT_NODE);
+    if (Child->Type == CONST_INT_NODE) {
+      Expr->Type = CONST_FLOAT_NODE;
+      Expr->Value = static_cast<float>(std::get<int>(Child->Value));
+      Expr->SubTree.clear();
+      delete Child;
+    }
+    return;
+  }
+
+  if (Expr->SubTree.size() != 2)
+    return;
+
+  assert(Expr->Type == BIN_ADD_NODE || Expr->Type == BIN_SUB_NODE ||
+         Expr->Type == BIN_MUL_NODE || Expr->Type == BIN_DIV_NODE);
+  AST *LHS = Expr->SubTree[0], *RHS = Expr->SubTree[1];
+  optExpression(LHS);
+  optExpression(RHS);
+
+  bool ConstIntLHS = LHS->Type == CONST_INT_NODE;
+  bool ConstIntRHS = RHS->Type == CONST_INT_NODE;
+  if (!ConstIntLHS || !ConstIntRHS)
+    return;
+
+  int64_t LV = std::get<int>(LHS->Value), RV = std::get<int>(RHS->Value);
+  int64_t Result = fold(LV, RV, Expr->Type);
+  if (Result >= INT_MIN && Result <= INT_MAX) {
+    Expr->Type = CONST_INT_NODE;
+    Expr->Value = static_cast<int>(Result);
+    Expr->SubTree.clear();
+    delete LHS;
+    delete RHS;
+  }
+}
+
+void optProgram(AST *Program) {
+  for (AST *Node : Program->SubTree) {
+    if (Node->Type == ASSIGNMENT_NODE) {
+      AST *Expr = Node->SubTree[0];
+      optExpression(Expr);
+    }
+  }
 }
 
 int main(int argc, const char **argv) {
-  if (argc != 3) {
-    std::cerr << "[Usage] " << argv[0] << " source_file target_file\n";
+  if (argc != 3 && argc != 4) {
+    std::cerr << "[Usage] " << argv[0] << " source_file target_file [-O]\n";
     exit(1);
   }
   std::ifstream Source(argv[1]);
+  if (!Source) {
+    std::cerr << "[Error] failed to open source_file\n";
+    exit(1);
+  }
   std::ofstream Target(argv[2]);
-  Parser P(std::move(Source));
-  AST *Program = P.parse();
-  generateProgram(Program);
+  if (!Target) {
+    std::cerr << "[Error] failed to open target_file\n";
+    exit(1);
+  }
+  bool Opt = false;
+  if (argc == 4) {
+    if (strcmp(argv[3], "-O") != 0) {
+      std::cerr << "[Error] expecting -O, but " << argv[3] << " found.\n";
+      exit(1);
+    }
+    Opt = true;
+  }
+  Parser PS(std::move(Source));
+  AST *Program = PS.parse();
+
+  if (Opt)
+    optProgram(Program);
+
+  DCCodeGen DCG(PS.getSymbolTable(), std::move(Target));
+  DCG.genProgram(Program);
+  delete Program;
+  return 0;
 }
