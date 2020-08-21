@@ -13,20 +13,20 @@
 #include <vector>
 
 enum TokenType {
-  DECL_INT,
-  DECL_FLOAT,
-  CMD_PRINT,
-  CONST_INT,
-  CONST_FLOAT,
-  PAREN_L,
-  PAREN_R,
+  DECL_INT,    // integer declaration ("i")
+  DECL_FLOAT,  // float declaration ("f")
+  CMD_PRINT,   // print command ("p")
+  CONST_INT,   // integer constant
+  CONST_FLOAT, // float constant
+  PAREN_L,     // left parenthesis
+  PAREN_R,     // right parenthesis
   IDENTIFIER,
-  BIN_OP_ADD,
-  BIN_OP_SUB,
-  BIN_OP_MUL,
-  BIN_OP_DIV,
-  BIN_OP_ASSIGN,
-  END_OF_FILE
+  BIN_OP_ADD,    // addition operator ("+")
+  BIN_OP_SUB,    // subtraction operator ("-")
+  BIN_OP_MUL,    // multiplication operator ("*")
+  BIN_OP_DIV,    // division operator ("/")
+  BIN_OP_ASSIGN, // assignment operator ("=")
+  END_OF_FILE    // EOF
 };
 
 struct Token {
@@ -43,6 +43,7 @@ void emitErrorImpl(HeadT &&H, TailT &&... T) {
   emitErrorImpl(std::forward<TailT>(T)...);
 }
 
+/// Helper function of emitting the error to standard error.
 template <typename... ArgsT>
 [[noreturn]] void emitError(std::string E, ArgsT &&... Args) {
   std::cerr << "[Error] " << E << ": ";
@@ -58,7 +59,7 @@ class Tokenizer {
   Token getNextToken();
   Token getNumericToken(char C);
   Token getDeclOrIDToken(char C);
-  Token getParenOrOpToken(char C);
+  Token getParenOrOpToken(char C) const;
 
 public:
   Tokenizer(std::ifstream &&S) : IFS(std::move(S)), CurToken(getNextToken()) {}
@@ -103,7 +104,7 @@ Token Tokenizer::getDeclOrIDToken(char C) {
   return Tok;
 }
 
-Token Tokenizer::getParenOrOpToken(char C) {
+Token Tokenizer::getParenOrOpToken(char C) const {
   switch (C) {
   case '+':
     return Token{BIN_OP_ADD};
@@ -149,13 +150,37 @@ Token Tokenizer::readToken() {
 }
 
 std::ostream &operator<<(std::ostream &S, TokenType T) {
-  if (T == DECL_INT)
+  switch (T) {
+  case DECL_INT:
     return S << "DECL_INT";
-  if (T == DECL_FLOAT)
+  case DECL_FLOAT:
     return S << "DECL_FLOAT";
-  if (T == CMD_PRINT)
+  case CMD_PRINT:
     return S << "CMD_PRINT";
-  return S;
+  case CONST_INT:
+    return S << "CONST_INT";
+  case CONST_FLOAT:
+    return S << "CONST_FLOAT";
+  case PAREN_L:
+    return S << "PAREN_L";
+  case PAREN_R:
+    return S << "PAREN_R";
+  case IDENTIFIER:
+    return S << "IDENTIFIER";
+  case BIN_OP_ADD:
+    return S << "BIN_OP_ADD";
+  case BIN_OP_SUB:
+    return S << "BIN_OP_SUB";
+  case BIN_OP_MUL:
+    return S << "BIN_OP_MUL";
+  case BIN_OP_DIV:
+    return S << "BIN_OP_DIV";
+  case BIN_OP_ASSIGN:
+    return S << "BIN_OP_ASSIGN";
+  case END_OF_FILE:
+    return S << "END_OF_FILE";
+  }
+  __builtin_unreachable();
 }
 
 enum VariableType { VAR_INT, VAR_FLOAT };
@@ -180,7 +205,7 @@ enum DataType { DATA_INT, DATA_FLOAT };
 struct AST {
   ASTNodeType Type;
   std::vector<AST *> SubTree;
-  std::variant<int, float, size_t, DataType> Value;
+  std::variant<int, size_t, DataType, std::string> Value;
 
   AST(ASTNodeType T) : Type(T) {}
   AST(ASTNodeType T, AST *Child) : Type(T), SubTree({Child}) {}
@@ -292,7 +317,7 @@ DataType Parser::getDataType(AST *Node) const {
     return DATA_INT;
   if (Node->Type == CONST_FLOAT_NODE)
     return DATA_FLOAT;
-  if (Node->Type == DECLARATION_NODE)
+  if (Node->Type == IDENTIFIER_NODE)
     return ST.getVarType(std::get<size_t>(Node->Value)) == VAR_INT ? DATA_INT
                                                                    : DATA_FLOAT;
   if (Node->Type == BIN_ADD_NODE || Node->Type == BIN_SUB_NODE ||
@@ -334,12 +359,12 @@ void Parser::reduceStack(std::vector<AST *> &Stack) {
   Stack.pop_back();
   std::reverse(Nodes.begin(), Nodes.end());
   AST *Prev = Nodes[0];
-  for (size_t i = 1; i < Nodes.size(); i += 2) {
-    assert(Nodes[i]->Type == BIN_MUL_NODE || Nodes[i]->Type == BIN_DIV_NODE);
-    AST *LHS = Prev, *RHS = Nodes[i + 1];
-    Nodes[i]->Value = promoteType(LHS, RHS);
-    Nodes[i]->SubTree = {LHS, RHS};
-    Prev = Nodes[i];
+  for (size_t I = 1, E = Nodes.size(); I < E; I += 2) {
+    assert(Nodes[I]->Type == BIN_MUL_NODE || Nodes[I]->Type == BIN_DIV_NODE);
+    AST *LHS = Prev, *RHS = Nodes[I + 1];
+    Nodes[I]->Value = promoteType(LHS, RHS);
+    Nodes[I]->SubTree = {LHS, RHS};
+    Prev = Nodes[I];
   }
   Stack.push_back(Prev);
 }
@@ -368,14 +393,16 @@ AST *Parser::parseExpression() {
       case CONST_INT: {
         std::string Value = TK.readToken().Value;
         AST *Node = new AST(CONST_INT_NODE);
-        Node->Value = std::stoi(Value);
+        if (Value.size() <= 9)
+          Node->Value = std::stoi(Value);
+        else
+          Node->Value = std::move(Value);
         Stack.push_back(Node);
         break;
       }
       case CONST_FLOAT: {
-        std::string Value = TK.readToken().Value;
         AST *Node = new AST(CONST_FLOAT_NODE);
-        Node->Value = std::stof(Value);
+        Node->Value = TK.readToken().Value;
         Stack.push_back(Node);
         break;
       }
@@ -407,11 +434,12 @@ AST *Parser::parseExpression() {
   reduceStack(Stack);
   assert(Stack.size() % 2 == 1);
   AST *Prev = Stack[0];
-  for (size_t i = 1; i < Stack.size(); i += 2) {
-    assert(Stack[i]->Type == BIN_ADD_NODE || Stack[i]->Type == BIN_SUB_NODE);
-    Stack[i]->SubTree = {Prev, Stack[i + 1]};
-    Stack[i]->Value = promoteType(Prev, Stack[i + 1]);
-    Prev = Stack[i];
+  for (size_t I = 1, E = Stack.size(); I < E; I += 2) {
+    assert(Stack[I]->Type == BIN_ADD_NODE || Stack[I]->Type == BIN_SUB_NODE);
+    AST *LHS = Prev, *RHS = Stack[I + 1];
+    Stack[I]->Value = promoteType(LHS, RHS);
+    Stack[I]->SubTree = {LHS, RHS};
+    Prev = Stack[I];
   }
   return Prev;
 }
@@ -476,10 +504,13 @@ void DCCodeGen::genExpression(AST *Expr) {
         << "\n";
     return;
   case CONST_INT_NODE:
-    OFS << std::get<int>(Expr->Value) << "\n";
+    if (std::holds_alternative<int>(Expr->Value))
+      OFS << std::get<int>(Expr->Value) << "\n";
+    else
+      OFS << std::get<std::string>(Expr->Value) << "\n";
     return;
   case CONST_FLOAT_NODE:
-    OFS << std::get<float>(Expr->Value) << "\n";
+    OFS << std::get<std::string>(Expr->Value) << "\n";
     return;
   case BIN_ADD_NODE:
   case BIN_SUB_NODE:
@@ -528,7 +559,10 @@ void optExpression(AST *Expr) {
     assert(Child->Type != CONST_FLOAT_NODE);
     if (Child->Type == CONST_INT_NODE) {
       Expr->Type = CONST_FLOAT_NODE;
-      Expr->Value = static_cast<float>(std::get<int>(Child->Value));
+      if (std::holds_alternative<int>(Child->Value))
+        Expr->Value = std::to_string(std::get<int>(Child->Value));
+      else
+        Expr->Value = std::move(std::get<std::string>(Child->Value));
       Expr->SubTree.clear();
       delete Child;
     }
@@ -544,12 +578,17 @@ void optExpression(AST *Expr) {
   optExpression(LHS);
   optExpression(RHS);
 
-  bool ConstIntLHS = LHS->Type == CONST_INT_NODE;
-  bool ConstIntRHS = RHS->Type == CONST_INT_NODE;
+  bool ConstIntLHS =
+      LHS->Type == CONST_INT_NODE && std::holds_alternative<int>(LHS->Value);
+  bool ConstIntRHS =
+      RHS->Type == CONST_INT_NODE && std::holds_alternative<int>(RHS->Value);
   if (!ConstIntLHS || !ConstIntRHS)
     return;
 
   int64_t LV = std::get<int>(LHS->Value), RV = std::get<int>(RHS->Value);
+  if (Expr->Type == BIN_DIV_NODE && RV == 0)
+    return;
+
   int64_t Result = fold(LV, RV, Expr->Type);
   if (Result >= INT_MIN && Result <= INT_MAX) {
     Expr->Type = CONST_INT_NODE;
