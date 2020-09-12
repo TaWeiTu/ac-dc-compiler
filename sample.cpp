@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cassert>
-#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -254,7 +253,8 @@ AST *Parser::parseStatement() {
     return parseDeclaration(Tok.Type);
 
   if (Tok.Type == IDENTIFIER) {
-    assert(Tok.Value.size() == 1);
+    assert(Tok.Value.size() == 1 &&
+           "Variable names with multiple characters are not supported.");
     return parseAssignment(Tok.Value[0]);
   }
 
@@ -266,7 +266,9 @@ AST *Parser::parseStatement() {
   if (Tok.Type != IDENTIFIER)
     emitError("Parser", "expecting IDENTIFIER, but ", Tok.Type, " found.");
 
-  assert(Tok.Value.size() == 1);
+  // Print statement.
+  assert(Tok.Value.size() == 1 &&
+         "Variable names with multiple characters are not supported.");
   size_t Var = ST.getVarID(Tok.Value[0]);
   AST *Node = new AST(PRINTSTMT_NODE);
   Node->Value = Var;
@@ -278,7 +280,8 @@ AST *Parser::parseDeclaration(TokenType DeclType) {
   if (Tok.Type != IDENTIFIER)
     emitError("Parser", "expecting IDENTIFIER, but ", DeclType, " found.");
   AST *Node = new AST(DECLARATION_NODE);
-  assert(Tok.Value.size() == 1);
+  assert(Tok.Value.size() == 1 &&
+         "Variable names with multiple characters are not supported.");
   Node->Value = ST.declareSymbol(Tok.Value[0], DeclType);
   return Node;
 }
@@ -343,7 +346,8 @@ AST *Parser::parseValue() {
     break;
   case IDENTIFIER:
     Node->Type = IDENTIFIER_NODE;
-    assert(Tok.Value.size() == 1);
+    assert(Tok.Value.size() == 1 &&
+           "Variable names with multiple characters are not supported.");
     Node->Value = ST.getVarID(Tok.Value[0]);
     break;
   default:
@@ -426,7 +430,8 @@ void DCCodeGen::genExpression(AST *Expr) {
     return;
   case BIN_ADD_NODE:
   case BIN_SUB_NODE: {
-    assert(Expr->SubTree.size() == 2);
+    assert(Expr->SubTree.size() == 2 &&
+           "Expecting two children for binary expressions.");
     genExpression(Expr->SubTree[0]);
     genExpression(Expr->SubTree[1]);
     Precision Prec =

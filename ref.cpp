@@ -43,7 +43,7 @@ void emitErrorImpl(HeadT &&H, TailT &&... T) {
   emitErrorImpl(std::forward<TailT>(T)...);
 }
 
-/// Helper function of emitting the error to standard error.
+/// Helper function of emitting errors to standard error.
 template <typename... ArgsT>
 [[noreturn]] void emitError(std::string E, ArgsT &&... Args) {
   std::cerr << "[Error] " << E << ": ";
@@ -205,7 +205,7 @@ enum DataType { DATA_INT, DATA_FLOAT };
 struct AST {
   ASTNodeType Type;
   std::vector<AST *> SubTree;
-  std::variant<int, size_t, DataType, std::string> Value;
+  std::variant<int32_t, size_t, DataType, std::string> Value;
 
   AST(ASTNodeType T) : Type(T) {}
   AST(ASTNodeType T, AST *Child) : Type(T), SubTree({Child}) {}
@@ -504,8 +504,8 @@ void DCCodeGen::genExpression(AST *Expr) {
         << "\n";
     return;
   case CONST_INT_NODE:
-    if (std::holds_alternative<int>(Expr->Value))
-      OFS << std::get<int>(Expr->Value) << "\n";
+    if (std::holds_alternative<int32_t>(Expr->Value))
+      OFS << std::get<int32_t>(Expr->Value) << "\n";
     else
       OFS << std::get<std::string>(Expr->Value) << "\n";
     return;
@@ -559,8 +559,8 @@ void optExpression(AST *Expr) {
     assert(Child->Type != CONST_FLOAT_NODE);
     if (Child->Type == CONST_INT_NODE) {
       Expr->Type = CONST_FLOAT_NODE;
-      if (std::holds_alternative<int>(Child->Value))
-        Expr->Value = std::to_string(std::get<int>(Child->Value));
+      if (std::holds_alternative<int32_t>(Child->Value))
+        Expr->Value = std::to_string(std::get<int32_t>(Child->Value));
       else
         Expr->Value = std::move(std::get<std::string>(Child->Value));
       Expr->SubTree.clear();
@@ -578,21 +578,22 @@ void optExpression(AST *Expr) {
   optExpression(LHS);
   optExpression(RHS);
 
-  bool ConstIntLHS =
-      LHS->Type == CONST_INT_NODE && std::holds_alternative<int>(LHS->Value);
-  bool ConstIntRHS =
-      RHS->Type == CONST_INT_NODE && std::holds_alternative<int>(RHS->Value);
+  bool ConstIntLHS = LHS->Type == CONST_INT_NODE &&
+                     std::holds_alternative<int32_t>(LHS->Value);
+  bool ConstIntRHS = RHS->Type == CONST_INT_NODE &&
+                     std::holds_alternative<int32_t>(RHS->Value);
   if (!ConstIntLHS || !ConstIntRHS)
     return;
 
-  int64_t LV = std::get<int>(LHS->Value), RV = std::get<int>(RHS->Value);
+  int64_t LV = std::get<int32_t>(LHS->Value),
+          RV = std::get<int32_t>(RHS->Value);
   if (Expr->Type == BIN_DIV_NODE && RV == 0)
     return;
 
   int64_t Result = fold(LV, RV, Expr->Type);
   if (Result >= INT_MIN && Result <= INT_MAX) {
     Expr->Type = CONST_INT_NODE;
-    Expr->Value = static_cast<int>(Result);
+    Expr->Value = static_cast<int32_t>(Result);
     Expr->SubTree.clear();
     delete LHS;
     delete RHS;
