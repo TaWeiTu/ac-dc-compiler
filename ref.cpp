@@ -55,6 +55,7 @@ template <typename... ArgsT>
 class Tokenizer {
   std::ifstream IFS;
   Token CurToken;
+  size_t NumWhiteSpaces;
 
   Token getNextToken();
   Token getNumericToken(char C);
@@ -62,9 +63,11 @@ class Tokenizer {
   Token getParenOrOpToken(char C) const;
 
 public:
-  Tokenizer(std::ifstream &&S) : IFS(std::move(S)), CurToken(getNextToken()) {}
+  Tokenizer(std::ifstream &&S)
+      : IFS(std::move(S)), CurToken(getNextToken()), NumWhiteSpaces(0) {}
 
   operator bool() const { return CurToken.Type != END_OF_FILE; }
+  bool hasReadWhiteSpaces() const { return NumWhiteSpaces != 0; }
   Token readToken();
   const Token &peekToken();
 };
@@ -128,8 +131,11 @@ Token Tokenizer::getParenOrOpToken(char C) const {
 
 Token Tokenizer::getNextToken() {
   char C = IFS.get();
-  while (isspace(C))
+  NumWhiteSpaces = 0;
+  while (isspace(C)) {
     C = IFS.get();
+    NumWhiteSpaces++;
+  }
 
   if (C == EOF)
     return Token{END_OF_FILE};
@@ -231,10 +237,10 @@ public:
   }
 
   size_t getVarID(const std::string &ID) const {
-    auto Ptr = VarID.find(ID);
-    if (Ptr == VarID.end())
-      emitError("SymbolTable", "use of undeclared variable ", ID);
-    return Ptr->second;
+    auto Iter = VarID.find(ID);
+    if (Iter == VarID.end())
+      emitError("SymbolTable", "use of undeclared identifier ", ID);
+    return Iter->second;
   }
 
   VariableType getVarType(const std::string &ID) const {
@@ -264,8 +270,19 @@ public:
 
 AST *Parser::parse() {
   AST *Node = new AST(PROGRAM_NODE);
-  while (TK)
-    Node->SubTree.push_back(parseStatement());
+  bool EndOfDecl = false, FirstStmt = true;
+  while (TK) {
+    AST *Stmt = parseStatement();
+    if (!FirstStmt && !TK.hasReadWhiteSpaces())
+      emitError("Parser", "expecting white spaces at the end of a statement.");
+    FirstStmt = false;
+    if (EndOfDecl && Stmt->Type == DECLARATION_NODE)
+      emitError("Parser",
+                "declarations should come before other types of statements.");
+    if (Stmt->Type != DECLARATION_NODE)
+      EndOfDecl = true;
+    Node->SubTree.push_back(Stmt);
+  }
   return Node;
 }
 
@@ -301,7 +318,7 @@ AST *Parser::parseDeclaration(TokenType DeclType) {
 
 AST *Parser::parseAssignment(const std::string &ID) {
   size_t Var = ST.getVarID(ID);
-  if (auto T = TK.readToken().Type; T != BIN_OP_ASSIGN)
+  if (TokenType T = TK.readToken().Type; T != BIN_OP_ASSIGN)
     emitError("Parser", "expecting BIN_OP_ASSIGN, but ", T, " found.");
 
   AST *Expr = parseExpression();
@@ -504,14 +521,23 @@ void DCCodeGen::genExpression(AST *Expr) {
         << "\n";
     return;
   case CONST_INT_NODE:
-    if (std::holds_alternative<int32_t>(Expr->Value))
-      OFS << std::get<int32_t>(Expr->Value) << "\n";
-    else
-      OFS << std::get<std::string>(Expr->Value) << "\n";
+    if (std::holds_alternative<int32_t>(Expr->Value)) {
+      int32_t Value = std::get<int32_t>(Expr->Value);
+      OFS << (Value < 0 ? "_" : "") << abs(Value) << "\n";
+    } else {
+      std::string &Str = std::get<std::string>(Expr->Value);
+      if (!Str.empty() && Str[0] == '-')
+        Str[0] = '_';
+      OFS << Str << "\n";
+    }
     return;
-  case CONST_FLOAT_NODE:
-    OFS << std::get<std::string>(Expr->Value) << "\n";
+  case CONST_FLOAT_NODE: {
+    std::string &Str = std::get<std::string>(Expr->Value);
+    if (!Str.empty() && Str[0] == '-')
+      Str[0] = '_';
+    OFS << Str << "\n";
     return;
+  }
   case BIN_ADD_NODE:
   case BIN_SUB_NODE:
   case BIN_MUL_NODE:
@@ -535,7 +561,8 @@ void DCCodeGen::genExpression(AST *Expr) {
 
 void DCCodeGen::genPrintStmt(AST *Stmt) {
   assert(Stmt->SubTree.empty());
-  OFS << "l" << static_cast<char>('a' + std::get<size_t>(Stmt->Value)) << "\n";
+  size_t Var = std::get<size_t>(Stmt->Value);
+  OFS << "l" << static_cast<char>('a' + Var) << "\n";
   OFS << "p\n";
 }
 

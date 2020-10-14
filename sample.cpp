@@ -50,16 +50,19 @@ template <typename... ArgsT>
 class Tokenizer {
   std::ifstream IFS;
   Token CurToken;
+  size_t NumWhiteSpaces;
 
   Token getNextToken();
   Token getNumericToken(char C);
-  Token getDeclOrIDToken(char C) const;
+  Token getDeclOrIDToken(char C);
   Token getOpToken(char C) const;
 
 public:
-  Tokenizer(std::ifstream &&S) : IFS(std::move(S)), CurToken(getNextToken()) {}
+  Tokenizer(std::ifstream &&S)
+      : IFS(std::move(S)), CurToken(getNextToken()), NumWhiteSpaces(0) {}
 
   operator bool() const { return CurToken.Type != END_OF_FILE; }
+  bool hasReadWhiteSpaces() const { return NumWhiteSpaces != 0; }
   Token readToken();
   const Token &peekToken();
 };
@@ -82,9 +85,17 @@ Token Tokenizer::getNumericToken(char C) {
   return Tok;
 }
 
-Token Tokenizer::getDeclOrIDToken(char C) const {
+Token Tokenizer::getDeclOrIDToken(char C) {
+  std::string Value = "";
+  while (isalpha(C)) {
+    Value += C;
+    C = IFS.get();
+  }
+  IFS.unget();
+  if (Value.size() > 1)
+    emitError("Tokenizer", "expecting single-character token.");
   Token Tok;
-  switch (C) {
+  switch (Value[0]) {
   case 'i':
     Tok.Type = DECL_INT;
     break;
@@ -96,7 +107,7 @@ Token Tokenizer::getDeclOrIDToken(char C) const {
     break;
   default:
     Tok.Type = IDENTIFIER;
-    Tok.Value = std::string(1, C);
+    Tok.Value = Value;
     break;
   }
   return Tok;
@@ -117,8 +128,11 @@ Token Tokenizer::getOpToken(char C) const {
 
 Token Tokenizer::getNextToken() {
   char C = IFS.get();
-  while (isspace(C))
+  NumWhiteSpaces = 0;
+  while (isspace(C)) {
     C = IFS.get();
+    NumWhiteSpaces++;
+  }
 
   if (C == EOF)
     return Token{END_OF_FILE};
@@ -131,12 +145,6 @@ Token Tokenizer::getNextToken() {
 }
 
 const Token &Tokenizer::peekToken() { return CurToken; }
-
-Token Tokenizer::readToken() {
-  Token Result(std::move(CurToken));
-  CurToken = getNextToken();
-  return Result;
-}
 
 std::ostream &operator<<(std::ostream &S, TokenType T) {
   switch (T) {
@@ -162,6 +170,12 @@ std::ostream &operator<<(std::ostream &S, TokenType T) {
     return S << "END_OF_FILE";
   }
   __builtin_unreachable();
+}
+
+Token Tokenizer::readToken() {
+  Token Result(std::move(CurToken));
+  CurToken = getNextToken();
+  return Result;
 }
 
 enum VariableType { VAR_INT, VAR_FLOAT };
@@ -211,10 +225,10 @@ public:
   }
 
   size_t getVarID(char ID) const {
-    auto Ptr = VarID.find(ID);
-    if (Ptr == VarID.end())
-      emitError("SymbolTable", "use of undeclared variable ", ID);
-    return Ptr->second;
+    auto Iter = VarID.find(ID);
+    if (Iter == VarID.end())
+      emitError("SymbolTable", "use of undeclared identifier ", ID);
+    return Iter->second;
   }
 
   VariableType getVarType(char ID) const { return VarType[getVarID(ID)]; }
@@ -242,8 +256,19 @@ public:
 
 AST *Parser::parse() {
   AST *Node = new AST(PROGRAM_NODE);
-  while (TK)
-    Node->SubTree.push_back(parseStatement());
+  bool EndOfDecl = false, FirstStmt = true;
+  while (TK) {
+    AST *Stmt = parseStatement();
+    if (!FirstStmt && !TK.hasReadWhiteSpaces())
+      emitError("Parser", "expecting white spaces at the end of a statement.");
+    FirstStmt = false;
+    if (EndOfDecl && Stmt->Type == DECLARATION_NODE)
+      emitError("Parser",
+                "declarations should come before other types of statements.");
+    if (Stmt->Type != DECLARATION_NODE)
+      EndOfDecl = true;
+    Node->SubTree.push_back(Stmt);
+  }
   return Node;
 }
 
@@ -288,7 +313,7 @@ AST *Parser::parseDeclaration(TokenType DeclType) {
 
 AST *Parser::parseAssignment(char ID) {
   size_t Var = ST.getVarID(ID);
-  if (auto T = TK.readToken().Type; T != BIN_OP_ASSIGN)
+  if (TokenType T = TK.readToken().Type; T != BIN_OP_ASSIGN)
     emitError("Parser", "expecting BIN_OP_ASSIGN, but ", T, " found.");
 
   AST *LHS = parseValue();
@@ -410,7 +435,7 @@ void DCCodeGen::genAssignment(AST *Stmt) {
   OFS << "s" << static_cast<char>('a' + std::get<size_t>(Stmt->Value)) << "\n";
 }
 
-char printOperator(ASTNodeType Type) {
+inline char printOperator(ASTNodeType Type) {
   return Type == BIN_ADD_NODE ? '+' : '-';
 }
 
@@ -455,8 +480,8 @@ void DCCodeGen::genPrintStmt(AST *Stmt) {
 }
 
 int main(int argc, const char **argv) {
-  if (argc != 3 && argc != 4) {
-    std::cerr << "[Usage] " << argv[0] << " source_file target_file [-O]\n";
+  if (argc != 3) {
+    std::cerr << "[Usage] " << argv[0] << " source_file target_file\n";
     exit(1);
   }
   std::ifstream Source(argv[1]);
@@ -468,14 +493,6 @@ int main(int argc, const char **argv) {
   if (!Target) {
     std::cerr << "[Error] failed to open target_file\n";
     exit(1);
-  }
-  bool Opt = false;
-  if (argc == 4) {
-    if (strcmp(argv[3], "-O") != 0) {
-      std::cerr << "[Error] expecting -O, but " << argv[3] << " found.\n";
-      exit(1);
-    }
-    Opt = true;
   }
   Parser PS(std::move(Source));
   AST *Program = PS.parse();
