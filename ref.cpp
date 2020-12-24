@@ -324,6 +324,12 @@ AST *Parser::parseAssignment(const std::string &ID) {
   AST *Expr = parseExpression();
   if (getDataType(Expr) == DATA_FLOAT && ST.getVarType(Var) == VAR_INT)
     emitError("Parser", "cannot convert float to integer.");
+  if (getDataType(Expr) == DATA_INT && ST.getVarType(Var) == VAR_FLOAT) {
+    AST *Conv = new AST(CONVERSION_NODE);
+    Conv->Value = DATA_FLOAT;
+    Conv->SubTree = {Expr};
+    Expr = Conv;
+  }
   AST *Node = new AST(ASSIGNMENT_NODE, Expr);
   Node->Value = Var;
   return Node;
@@ -469,7 +475,7 @@ class DCCodeGen {
 
   void genStatement(AST *Stmt);
   void genAssignment(AST *Stmt);
-  void genExpression(AST *Expr);
+  void genExpression(AST *Expr, bool ConvertToFloat = false);
   void genPrintStmt(AST *Stmt);
 
 public:
@@ -512,10 +518,10 @@ char printOperator(ASTNodeType Type) {
   return '/';
 }
 
-void DCCodeGen::genExpression(AST *Expr) {
+void DCCodeGen::genExpression(AST *Expr, bool ConvertToFloat) {
   switch (Expr->Type) {
   case CONVERSION_NODE:
-    return genExpression(Expr->SubTree[0]);
+    return genExpression(Expr->SubTree[0], true);
   case IDENTIFIER_NODE:
     OFS << "l" << static_cast<char>('a' + std::get<size_t>(Expr->Value))
         << "\n";
@@ -523,13 +529,16 @@ void DCCodeGen::genExpression(AST *Expr) {
   case CONST_INT_NODE:
     if (std::holds_alternative<int32_t>(Expr->Value)) {
       int32_t Value = std::get<int32_t>(Expr->Value);
-      OFS << (Value < 0 ? "_" : "") << abs(Value) << "\n";
+      OFS << (Value < 0 ? "_" : "") << abs(Value);
     } else {
       std::string &Str = std::get<std::string>(Expr->Value);
       if (!Str.empty() && Str[0] == '-')
         Str[0] = '_';
-      OFS << Str << "\n";
+      OFS << Str;
     }
+    if (ConvertToFloat)
+      OFS << ".00000";
+    OFS << "\n";
     return;
   case CONST_FLOAT_NODE: {
     std::string &Str = std::get<std::string>(Expr->Value);
@@ -543,12 +552,12 @@ void DCCodeGen::genExpression(AST *Expr) {
   case BIN_MUL_NODE:
   case BIN_DIV_NODE: {
     assert(Expr->SubTree.size() == 2);
-    genExpression(Expr->SubTree[0]);
-    genExpression(Expr->SubTree[1]);
+    genExpression(Expr->SubTree[0], ConvertToFloat);
+    genExpression(Expr->SubTree[1], ConvertToFloat);
     Precision Prec =
         std::get<DataType>(Expr->Value) == DATA_INT ? PREC_INT : PREC_FLOAT;
     if (Prec != CurPrec) {
-      OFS << (Prec == PREC_INT ? 0 : 5) << " k\n";
+      OFS << (Prec == PREC_INT ? 0 : 10) << " k\n";
       CurPrec = Prec;
     }
     OFS << printOperator(Expr->Type) << "\n";
@@ -580,22 +589,23 @@ template <typename T> T fold(T LHS, T RHS, ASTNodeType Op) {
 }
 
 void optExpression(AST *Expr) {
-  if (Expr->Type == CONVERSION_NODE) {
-    AST *Child = Expr->SubTree[0];
-    optExpression(Child);
-    assert(Child->Type != CONST_FLOAT_NODE);
-    if (Child->Type == CONST_INT_NODE) {
-      Expr->Type = CONST_FLOAT_NODE;
-      if (std::holds_alternative<int32_t>(Child->Value))
-        Expr->Value = std::to_string(std::get<int32_t>(Child->Value));
-      else
-        Expr->Value = std::move(std::get<std::string>(Child->Value));
-      Expr->SubTree.clear();
-      delete Child;
-    }
+  // if (Expr->Type == CONVERSION_NODE) {
+  //   AST *Child = Expr->SubTree[0];
+  //   optExpression(Child);
+  //   assert(Child->Type != CONST_FLOAT_NODE);
+  //   if (Child->Type == CONST_INT_NODE) {
+  //     Expr->Type = CONST_FLOAT_NODE;
+  //     if (std::holds_alternative<int32_t>(Child->Value))
+  //       Expr->Value = std::to_string(std::get<int32_t>(Child->Value));
+  //     else
+  //       Expr->Value = std::move(std::get<std::string>(Child->Value));
+  //     Expr->SubTree.clear();
+  //     delete Child;
+  //   }
+  //   return;
+  // }
+  if (Expr->Type == CONVERSION_NODE)
     return;
-  }
-
   if (Expr->SubTree.size() != 2)
     return;
 
